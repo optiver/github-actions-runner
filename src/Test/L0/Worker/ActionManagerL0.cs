@@ -6,6 +6,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using GitHub.DistributedTask.Expressions2;
@@ -161,6 +162,163 @@ namespace GitHub.Runner.Common.Tests.Worker
             }
             finally
             {
+                Teardown();
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Worker")]
+        public async void PrepareActions_DownloadActionArchive_RedirectUsesNetRcCredentials()
+        {
+            var originalNetRc = Environment.GetEnvironmentVariable("NETRC");
+            try
+            {
+                // Arrange
+                Setup();
+                const string ActionName = "ownerName/sample-action";
+                var actions = new List<Pipelines.ActionStep>
+                {
+                    new Pipelines.ActionStep()
+                    {
+                        Name = "action",
+                        Id = Guid.NewGuid(),
+                        Reference = new Pipelines.RepositoryPathReference()
+                        {
+                            Name = ActionName,
+                            Ref = "main",
+                            RepositoryType = "GitHub"
+                        }
+                    }
+                };
+
+                string archiveFile = await CreateRepoArchive();
+                using var stream = File.OpenRead(archiveFile);
+
+                // Credentials for the redirect target host live in a .netrc file.
+                var netrcFile = Path.Combine(_hc.GetDirectory(WellKnownDirectory.Temp), ".netrc");
+                Directory.CreateDirectory(Path.GetDirectoryName(netrcFile));
+                File.WriteAllText(netrcFile, "machine internal.cache login builder password hunter2\n");
+                Environment.SetEnvironmentVariable("NETRC", netrcFile);
+
+                string archiveLink = GetLinkToActionArchive("https://api.github.com", ActionName, "main");
+                const string CacheLink = "https://internal.cache/codeload/ownerName/sample-action/main";
+                string expectedBasicToken = Convert.ToBase64String(Encoding.UTF8.GetBytes("builder:hunter2"));
+
+                var mockClientHandler = new Mock<HttpClientHandler>();
+                // The gateway answers the archive request with a redirect to the caching server.
+                mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.Is<HttpRequestMessage>(m => m.RequestUri == new Uri(archiveLink)), ItExpr.IsAny<CancellationToken>())
+                    .Returns(() =>
+                    {
+                        var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+                        redirect.Headers.Location = new Uri(CacheLink);
+                        return Task.FromResult(redirect);
+                    });
+                // The caching server rejects requests without the .netrc credentials.
+                mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.Is<HttpRequestMessage>(m => m.RequestUri == new Uri(CacheLink)), ItExpr.IsAny<CancellationToken>())
+                    .Returns((HttpRequestMessage request, CancellationToken token) =>
+                    {
+                        var auth = request.Headers.Authorization;
+                        if (auth == null || auth.Scheme != "Basic" || auth.Parameter != expectedBasicToken)
+                        {
+                            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized));
+                        }
+
+                        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) });
+                    });
+
+                var mockHandlerFactory = new Mock<IHttpClientHandlerFactory>();
+                mockHandlerFactory.Setup(p => p.CreateClientHandler(It.IsAny<RunnerWebProxy>())).Returns(mockClientHandler.Object);
+                _hc.SetSingleton(mockHandlerFactory.Object);
+
+                _configurationStore.Object.GetSettings().IsHostedServer = true;
+
+                // Act
+                await _actionManager.PrepareActionsAsync(_ec.Object, actions);
+
+                // Assert
+                var watermarkFile = Path.Combine(_hc.GetDirectory(WellKnownDirectory.Actions), ActionName, "main.completed");
+                Assert.True(File.Exists(watermarkFile));
+
+                var actionYamlFile = Path.Combine(_hc.GetDirectory(WellKnownDirectory.Actions), ActionName, "main", "action.yml");
+                Assert.True(File.Exists(actionYamlFile));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NETRC", originalNetRc);
+                Teardown();
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Worker")]
+        public async void PrepareActions_DownloadActionArchive_RedirectWithoutNetRcDropsAuthorization()
+        {
+            var originalNetRc = Environment.GetEnvironmentVariable("NETRC");
+            try
+            {
+                // Arrange
+                Setup();
+                const string ActionName = "ownerName/sample-action";
+                var actions = new List<Pipelines.ActionStep>
+                {
+                    new Pipelines.ActionStep()
+                    {
+                        Name = "action",
+                        Id = Guid.NewGuid(),
+                        Reference = new Pipelines.RepositoryPathReference()
+                        {
+                            Name = ActionName,
+                            Ref = "main",
+                            RepositoryType = "GitHub"
+                        }
+                    }
+                };
+
+                string archiveFile = await CreateRepoArchive();
+                using var stream = File.OpenRead(archiveFile);
+
+                // Make sure no .netrc on the test host leaks into this test.
+                Environment.SetEnvironmentVariable("NETRC", Path.Combine(_hc.GetDirectory(WellKnownDirectory.Temp), "netrc-does-not-exist"));
+
+                string archiveLink = GetLinkToActionArchive("https://api.github.com", ActionName, "main");
+                const string CacheLink = "https://internal.cache/codeload/ownerName/sample-action/main";
+                var redirectedRequestHadAuthorization = false;
+
+                var mockClientHandler = new Mock<HttpClientHandler>();
+                mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.Is<HttpRequestMessage>(m => m.RequestUri == new Uri(archiveLink)), ItExpr.IsAny<CancellationToken>())
+                    .Returns(() =>
+                    {
+                        var redirect = new HttpResponseMessage(HttpStatusCode.Found);
+                        redirect.Headers.Location = new Uri(CacheLink);
+                        return Task.FromResult(redirect);
+                    });
+                mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.Is<HttpRequestMessage>(m => m.RequestUri == new Uri(CacheLink)), ItExpr.IsAny<CancellationToken>())
+                    .Returns((HttpRequestMessage request, CancellationToken token) =>
+                    {
+                        redirectedRequestHadAuthorization = request.Headers.Authorization != null;
+                        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) });
+                    });
+
+                var mockHandlerFactory = new Mock<IHttpClientHandlerFactory>();
+                mockHandlerFactory.Setup(p => p.CreateClientHandler(It.IsAny<RunnerWebProxy>())).Returns(mockClientHandler.Object);
+                _hc.SetSingleton(mockHandlerFactory.Object);
+
+                _configurationStore.Object.GetSettings().IsHostedServer = true;
+
+                // Act
+                await _actionManager.PrepareActionsAsync(_ec.Object, actions);
+
+                // Assert - the original Authorization header must never be forwarded on redirect.
+                Assert.False(redirectedRequestHadAuthorization);
+
+                var actionYamlFile = Path.Combine(_hc.GetDirectory(WellKnownDirectory.Actions), ActionName, "main", "action.yml");
+                Assert.True(File.Exists(actionYamlFile));
+            }
+            finally
+            {
+                Environment.SetEnvironmentVariable("NETRC", originalNetRc);
                 Teardown();
             }
         }

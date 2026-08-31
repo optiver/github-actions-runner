@@ -54,6 +54,9 @@ namespace GitHub.Runner.Worker
         //81920 is the default used by System.IO.Stream.CopyTo and is under the large object heap threshold (85k).
         private const int _defaultCopyBufferSize = 81920;
 
+        // Maximum redirect hops to follow when downloading an action archive.
+        private const int _maxDownloadRedirects = 10;
+
         private readonly Dictionary<Guid, ContainerInfo> _cachedActionContainers = new();
         public Dictionary<Guid, ContainerInfo> CachedActionContainers => _cachedActionContainers;
 
@@ -1641,6 +1644,42 @@ namespace GitHub.Runner.Worker
             }
         }
 
+        private static bool IsRedirectStatusCode(HttpStatusCode statusCode)
+        {
+            switch (statusCode)
+            {
+                case HttpStatusCode.MovedPermanently:
+                case HttpStatusCode.Found:
+                case HttpStatusCode.SeeOther:
+                case HttpStatusCode.TemporaryRedirect:
+                case HttpStatusCode.PermanentRedirect:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private AuthenticationHeaderValue CreateRedirectAuthHeader(Uri redirectUri)
+        {
+            var credential = NetRcUtil.GetCredential(redirectUri.Host);
+            if (credential == null)
+            {
+                // Match the handler's redirect behavior: the original Authorization
+                // header is never forwarded to a redirect target.
+                return null;
+            }
+
+            Trace.Info($"Using credentials from .netrc for redirect target host '{redirectUri.Host}'.");
+            if (!string.IsNullOrEmpty(credential.Password))
+            {
+                HostContext.SecretMasker.AddValue(credential.Password);
+            }
+
+            var base64EncodingToken = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{credential.Login}:{credential.Password}"));
+            HostContext.SecretMasker.AddValue(base64EncodingToken);
+            return new AuthenticationHeaderValue("Basic", base64EncodingToken);
+        }
+
         private async Task DownloadRepositoryArchive(IExecutionContext executionContext, string downloadUrl, string downloadAuthToken, string archiveFile)
         {
             Trace.Info($"Save archive '{downloadUrl}' into {archiveFile}.");
@@ -1662,52 +1701,91 @@ namespace GitHub.Runner.Worker
                             //open zip stream in async mode
                             using (FileStream fs = new(archiveFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: _defaultFileStreamBufferSize, useAsync: true))
                             using (var httpClientHandler = HostContext.CreateHttpClientHandler())
-                            using (var httpClient = new HttpClient(httpClientHandler))
                             {
-                                httpClient.DefaultRequestHeaders.Authorization = CreateAuthHeader(executionContext, downloadUrl, downloadAuthToken);
-
-                                httpClient.DefaultRequestHeaders.UserAgent.AddRange(HostContext.UserAgents);
-                                using (var response = await httpClient.GetAsync(downloadUrl))
+                                // Follow redirects manually. The handler drops the Authorization
+                                // header on every redirect, which leaves gateways that redirect
+                                // codeload downloads to another host (e.g. an enterprise caching
+                                // server) with an unauthenticated request. Handling the hops here
+                                // lets us attach credentials from .netrc for the redirect target,
+                                // the same way curl does.
+                                httpClientHandler.AllowAutoRedirect = false;
+                                using (var httpClient = new HttpClient(httpClientHandler))
                                 {
-                                    requestId = UrlUtil.GetGitHubRequestId(response.Headers);
-                                    if (!string.IsNullOrEmpty(requestId))
-                                    {
-                                        Trace.Info($"Request URL: {downloadUrl} X-GitHub-Request-Id: {requestId} Http Status: {response.StatusCode}");
-                                    }
+                                    httpClient.DefaultRequestHeaders.UserAgent.AddRange(HostContext.UserAgents);
 
-                                    if (response.IsSuccessStatusCode)
+                                    var requestUrl = downloadUrl;
+                                    var authHeader = CreateAuthHeader(executionContext, requestUrl, downloadAuthToken);
+                                    int redirectCount = 0;
+                                    bool downloadSucceeded = false;
+                                    while (!downloadSucceeded)
                                     {
-                                        using (var result = await response.Content.ReadAsStreamAsync())
+                                        using (var request = new HttpRequestMessage(HttpMethod.Get, requestUrl))
                                         {
-                                            await result.CopyToAsync(fs, _defaultCopyBufferSize, actionDownloadCancellation.Token);
-                                            await fs.FlushAsync(actionDownloadCancellation.Token);
+                                            request.Headers.Authorization = authHeader;
+                                            using (var response = await httpClient.SendAsync(request))
+                                            {
+                                                requestId = UrlUtil.GetGitHubRequestId(response.Headers);
+                                                if (!string.IsNullOrEmpty(requestId))
+                                                {
+                                                    Trace.Info($"Request URL: {requestUrl} X-GitHub-Request-Id: {requestId} Http Status: {response.StatusCode}");
+                                                }
 
-                                            // download succeed, break out the retry loop.
-                                            break;
+                                                if (IsRedirectStatusCode(response.StatusCode) && response.Headers.Location != null)
+                                                {
+                                                    if (++redirectCount > _maxDownloadRedirects)
+                                                    {
+                                                        throw new HttpRequestException($"Exceeded the maximum of {_maxDownloadRedirects} redirects while downloading '{downloadUrl}'.");
+                                                    }
+
+                                                    var redirectUri = new Uri(new Uri(requestUrl), response.Headers.Location);
+                                                    // Don't log the query string; redirect targets may carry signed parameters.
+                                                    Trace.Info($"Download redirected ({(int)response.StatusCode}) to '{redirectUri.GetLeftPart(UriPartial.Path)}'.");
+                                                    authHeader = CreateRedirectAuthHeader(redirectUri);
+                                                    requestUrl = redirectUri.AbsoluteUri;
+                                                    continue;
+                                                }
+
+                                                if (response.IsSuccessStatusCode)
+                                                {
+                                                    using (var result = await response.Content.ReadAsStreamAsync())
+                                                    {
+                                                        await result.CopyToAsync(fs, _defaultCopyBufferSize, actionDownloadCancellation.Token);
+                                                        await fs.FlushAsync(actionDownloadCancellation.Token);
+
+                                                        // download succeed, break out the retry loop.
+                                                        downloadSucceeded = true;
+                                                    }
+                                                }
+                                                else if (response.StatusCode == HttpStatusCode.NotFound)
+                                                {
+                                                    // It doesn't make sense to retry in this case, so just stop
+                                                    throw new ActionNotFoundException(new Uri(downloadUrl), requestId);
+                                                }
+                                                else if (response.StatusCode == HttpStatusCode.Forbidden)
+                                                {
+                                                    // It doesn't make sense to retry in this case, so just stop
+                                                    throw new AccessDeniedException($"Access denied to '{downloadUrl}' ({requestId})");
+                                                }
+                                                else
+                                                {
+                                                    if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                                                    {
+                                                        // We are being throttled, use the Retry-After header (if provided) to decide backoff time.
+                                                        // We will back off between 10s and 10min when Retry-After is provided.
+                                                        var retryAfterHeader = UrlUtil.GetRetryAfter(response.Headers);
+                                                        retryAfter = VssNetworkHelper.ConvertRetryAfterToTimeSpan(retryAfterHeader, TimeSpan.FromSeconds(10), TimeSpan.FromMinutes(10));
+                                                    }
+
+                                                    // Something else bad happened, let's go to our retry logic
+                                                    response.EnsureSuccessStatusCode();
+                                                }
+                                            }
                                         }
                                     }
-                                    else if (response.StatusCode == HttpStatusCode.NotFound)
-                                    {
-                                        // It doesn't make sense to retry in this case, so just stop
-                                        throw new ActionNotFoundException(new Uri(downloadUrl), requestId);
-                                    }
-                                    else if (response.StatusCode == HttpStatusCode.Forbidden)
-                                    {
-                                        // It doesn't make sense to retry in this case, so just stop
-                                        throw new AccessDeniedException($"Access denied to '{downloadUrl}' ({requestId})");
-                                    }
-                                    else
-                                    {
-                                        if (response.StatusCode == HttpStatusCode.TooManyRequests)
-                                        {
-                                            // We are being throttled, use the Retry-After header (if provided) to decide backoff time.
-                                            // We will back off between 10s and 10min when Retry-After is provided.
-                                            var retryAfterHeader = UrlUtil.GetRetryAfter(response.Headers);
-                                            retryAfter = VssNetworkHelper.ConvertRetryAfterToTimeSpan(retryAfterHeader, TimeSpan.FromSeconds(10), TimeSpan.FromMinutes(10));
-                                        }
 
-                                        // Something else bad happened, let's go to our retry logic
-                                        response.EnsureSuccessStatusCode();
+                                    if (downloadSucceeded)
+                                    {
+                                        break;
                                     }
                                 }
                             }
