@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 
 namespace GitHub.Runner.Sdk
 {
@@ -65,115 +66,174 @@ namespace GitHub.Runner.Sdk
 
         public static NetRcCredential GetCredential(string filePath, string host)
         {
-            if (string.IsNullOrEmpty(filePath) || string.IsNullOrEmpty(host) || !File.Exists(filePath))
+            return GetCredential(ReadCredentials(filePath), host);
+        }
+
+        public static NetRcCredential GetCredential(IReadOnlyDictionary<string, NetRcCredential> credentials, string host)
+        {
+            if (string.IsNullOrEmpty(host))
             {
                 return null;
             }
 
-            string[] lines;
+            return credentials.TryGetValue(host, out var credential) || credentials.TryGetValue(string.Empty, out credential)
+                ? credential
+                : null;
+        }
+
+        // An empty machine name represents the default entry. Read once per
+        // download attempt so all redirect hops use the same credential snapshot.
+        public static IReadOnlyDictionary<string, NetRcCredential> ReadCredentials(string filePath)
+        {
+            var machines = new Dictionary<string, NetRcCredential>(StringComparer.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(filePath))
+            {
+                return machines;
+            }
+
             try
             {
-                lines = File.ReadAllLines(filePath);
-            }
-            catch (IOException)
-            {
-                return null;
-            }
-            catch (UnauthorizedAccessException)
-            {
-                return null;
-            }
+                using var reader = File.OpenText(filePath);
+                string currentMachine = null;
+                string login = null;
+                string password = null;
 
-            var machines = new Dictionary<string, NetRcCredential>(StringComparer.OrdinalIgnoreCase);
-            NetRcCredential defaultCredential = null;
-
-            string currentMachine = null;
-            bool inDefault = false;
-            bool skippingMacro = false;
-            string login = null;
-            string password = null;
-
-            void FlushEntry()
-            {
-                if (inDefault && defaultCredential == null && password != null)
+                void FlushEntry()
                 {
-                    defaultCredential = new NetRcCredential(login ?? string.Empty, password);
-                }
-                else if (currentMachine != null && password != null && !machines.ContainsKey(currentMachine))
-                {
-                    // First matching entry wins, as with other .netrc consumers.
-                    machines[currentMachine] = new NetRcCredential(login ?? string.Empty, password);
-                }
-
-                currentMachine = null;
-                inDefault = false;
-                login = null;
-                password = null;
-            }
-
-            foreach (var line in lines)
-            {
-                if (skippingMacro)
-                {
-                    // A macdef body runs until the first blank line.
-                    if (string.IsNullOrWhiteSpace(line))
+                    if (currentMachine != null && password != null)
                     {
-                        skippingMacro = false;
+                        // First matching entry wins, as with other .netrc consumers.
+                        machines.TryAdd(currentMachine, new NetRcCredential(login ?? string.Empty, password));
                     }
-                    continue;
+
+                    currentMachine = null;
+                    login = null;
+                    password = null;
                 }
 
-                var tokens = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
-                for (int i = 0; i < tokens.Length; i++)
+                string token;
+                while ((token = ReadToken(reader)) != null)
                 {
-                    switch (tokens[i])
+                    switch (token)
                     {
                         case "machine":
                             FlushEntry();
-                            if (i + 1 < tokens.Length)
+                            currentMachine = ReadToken(reader);
+                            if (currentMachine == string.Empty)
                             {
-                                currentMachine = tokens[++i];
+                                currentMachine = null;
                             }
                             break;
                         case "default":
                             FlushEntry();
-                            inDefault = true;
+                            currentMachine = string.Empty;
                             break;
                         case "login":
-                            if (i + 1 < tokens.Length)
-                            {
-                                login = tokens[++i];
-                            }
+                            login = ReadToken(reader);
                             break;
                         case "password":
-                            if (i + 1 < tokens.Length)
-                            {
-                                password = tokens[++i];
-                            }
+                            password = ReadToken(reader);
                             break;
                         case "account":
                             // Recognized but unused; consume the value.
-                            i++;
+                            ReadToken(reader);
                             break;
                         case "macdef":
-                            i = tokens.Length; // rest of this line is the macro name
-                            skippingMacro = true;
-                            break;
-                        default:
-                            // Unknown token; ignore to stay permissive about hand-edited files.
+                            // Skip the macro name and body through the next blank line.
+                            reader.ReadLine();
+                            string line;
+                            while ((line = reader.ReadLine()) != null && !string.IsNullOrWhiteSpace(line))
+                            {
+                            }
                             break;
                     }
                 }
+
+                FlushEntry();
             }
-
-            FlushEntry();
-
-            if (machines.TryGetValue(host, out var credential))
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is FormatException)
             {
-                return credential;
+                // An unreadable or malformed file must not supply partial credentials.
+                machines.Clear();
             }
 
-            return defaultCredential;
+            return machines;
+        }
+
+        private static string ReadToken(TextReader reader)
+        {
+            int next;
+            while ((next = reader.Peek()) != -1)
+            {
+                if (char.IsWhiteSpace((char)next))
+                {
+                    reader.Read();
+                }
+                else if (next == '#')
+                {
+                    reader.ReadLine();
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            if (next == -1)
+            {
+                return null;
+            }
+
+            bool quoted = next == '"';
+            if (quoted)
+            {
+                reader.Read();
+            }
+            var token = new StringBuilder();
+            while ((next = reader.Peek()) != -1)
+            {
+                if (!quoted && char.IsWhiteSpace((char)next))
+                {
+                    return token.ToString();
+                }
+
+                reader.Read();
+                if (quoted && next == '"')
+                {
+                    return token.ToString();
+                }
+
+                if (quoted && (next == '\r' || next == '\n'))
+                {
+                    break;
+                }
+
+                if (quoted && next == '\\')
+                {
+                    next = reader.Read();
+                    if (next == -1 || next == '\r' || next == '\n')
+                    {
+                        break;
+                    }
+                    token.Append(next switch
+                    {
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        _ => (char)next
+                    });
+                }
+                else
+                {
+                    token.Append((char)next);
+                }
+            }
+
+            if (quoted)
+            {
+                throw new FormatException("Unterminated quoted value in .netrc.");
+            }
+            return token.ToString();
         }
     }
 }

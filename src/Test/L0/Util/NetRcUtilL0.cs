@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.IO;
 using GitHub.Runner.Sdk;
 using Xunit;
@@ -152,6 +152,81 @@ machine real.example.com login a password b
         public void GetCredential_MissingFile_ReturnsNull()
         {
             Assert.Null(NetRcUtil.GetCredential(Path.Combine(_tempDirectory, "does-not-exist"), "one.example.com"));
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void GetCredential_CommentsDoNotOverrideActiveEntries()
+        {
+            var filePath = WriteNetRc(@"
+# machine internal.cache login obsolete password obsolete
+machine internal.cache login builder password correct # password obsolete
+# macdef ignored
+machine other.cache login other password otherpw
+");
+
+            var credential = NetRcUtil.GetCredential(filePath, "internal.cache");
+            Assert.Equal("builder", credential.Login);
+            Assert.Equal("correct", credential.Password);
+            Assert.Equal("otherpw", NetRcUtil.GetCredential(filePath, "other.cache").Password);
+        }
+
+        [Theory]
+        [InlineData("plain#password", "plain#password")]
+        [InlineData("\"two words\"", "two words")]
+        [InlineData("\"two # words\"", "two # words")]
+        [InlineData("\"quote\\\"slash\\\\line\\nreturn\\rtab\\t\"", "quote\"slash\\line\nreturn\rtab\t")]
+        [InlineData("\"\"", "")]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void GetCredential_PreservesPasswordCharacters(string encodedPassword, string expectedPassword)
+        {
+            var filePath = WriteNetRc($"machine internal.cache login \"build user\" password {encodedPassword}\n");
+
+            var credential = NetRcUtil.GetCredential(filePath, "internal.cache");
+
+            Assert.Equal("build user", credential.Login);
+            Assert.Equal(expectedPassword, credential.Password);
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void GetCredential_ValuesMayFollowOnTheNextLine()
+        {
+            var filePath = WriteNetRc("machine\ninternal.cache\nlogin\nbuilder\npassword\ncorrect\n");
+
+            var credential = NetRcUtil.GetCredential(filePath, "internal.cache");
+
+            Assert.Equal("builder", credential.Login);
+            Assert.Equal("correct", credential.Password);
+        }
+
+        [Theory]
+        [InlineData("\"unterminated")]
+        [InlineData("\"unterminated\n")]
+        [InlineData("\"trailing\\")]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void ReadCredentials_MalformedFileDoesNotReturnPartialCredentials(string password)
+        {
+            var filePath = WriteNetRc($"default login fallback password fallbackpw\nmachine internal.cache login builder password {password}");
+
+            Assert.Empty(NetRcUtil.ReadCredentials(filePath));
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void ReadCredentials_KeepsASnapshotUntilReadAgain()
+        {
+            var filePath = WriteNetRc("machine internal.cache login builder password original");
+            var credentials = NetRcUtil.ReadCredentials(filePath);
+            File.WriteAllText(filePath, "machine internal.cache login builder password rotated");
+
+            Assert.Equal("original", NetRcUtil.GetCredential(credentials, "internal.cache").Password);
+            Assert.Equal("rotated", NetRcUtil.GetCredential(filePath, "internal.cache").Password);
         }
 
         [Fact]
