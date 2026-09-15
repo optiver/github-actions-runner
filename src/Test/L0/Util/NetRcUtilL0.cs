@@ -74,6 +74,42 @@ machine internal.cache
         }
 
         [Theory]
+        [InlineData("MACHINE private.service", true)]
+        [InlineData("MaChInE private.service", true)]
+        [InlineData("DEFAULT", false)]
+        [InlineData("DeFaUlT", false)]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void ReadCredentials_MixedCaseEntryBoundariesDoNotMixCredentials(string nextEntry, bool hasPrivateMachine)
+        {
+            var filePath = WriteNetRc($"machine internal.cache login builder password cache-password\n{nextEntry} login private-user password private-password\n");
+            var credentials = NetRcUtil.ReadCredentials(filePath);
+
+            Assert.Equal(hasPrivateMachine ? 2 : 1, credentials.Count);
+            Assert.Equal("builder", credentials["internal.cache"].Login);
+            Assert.Equal("cache-password", credentials["internal.cache"].Password);
+            if (hasPrivateMachine)
+            {
+                Assert.Equal("private-user", credentials["private.service"].Login);
+                Assert.Equal("private-password", credentials["private.service"].Password);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void GetCredential_MixedCaseDirectivesPreserveValueCase()
+        {
+            var filePath = WriteNetRc("MaChInE internal.cache LoGiN BuildUser PaSsWoRd SecretPass AcCoUnT password");
+
+            var credential = GetCredential(filePath, "internal.cache");
+
+            Assert.NotNull(credential);
+            Assert.Equal("BuildUser", credential.Login);
+            Assert.Equal("SecretPass", credential.Password);
+        }
+
+        [Theory]
         [InlineData("machine one.example.com login a password b", true)]
         [InlineData("default login fallback password everywhere", false)]
         [InlineData("default login fallback password everywhere\nmachine one.example.com login a password b", true)]
@@ -119,13 +155,15 @@ machine one.example.com login second password secondpw
             Assert.Equal("firstpw", credential.Password);
         }
 
-        [Fact]
+        [Theory]
+        [InlineData("macdef")]
+        [InlineData("MaCdEf")]
         [Trait("Level", "L0")]
         [Trait("Category", "Common")]
-        public void GetCredential_MacroBodyIsSkipped()
+        public void GetCredential_MacroBodyIsSkipped(string directive)
         {
-            var filePath = WriteNetRc(@"
-macdef init
+            var filePath = WriteNetRc($@"
+{directive} init
 machine bogus.example.com login trap password trap
 
 machine real.example.com login a password b
@@ -173,6 +211,7 @@ machine other.cache login other password otherpw
 
         [Theory]
         [InlineData("plain#password", "plain#password")]
+        [InlineData("#secret", "#secret")]
         [InlineData("\"two words\"", "two words")]
         [InlineData("\"two # words\"", "two # words")]
         [InlineData("\"quote\\\"slash\\\\line\\nreturn\\rtab\\t\"", "quote\"slash\\line\nreturn\rtab\t")]
@@ -189,17 +228,35 @@ machine other.cache login other password otherpw
             Assert.Equal(expectedPassword, credential.Password);
         }
 
-        [Fact]
+        [Theory]
+        [InlineData("correct")]
+        [InlineData("#secret")]
         [Trait("Level", "L0")]
         [Trait("Category", "Common")]
-        public void GetCredential_ValuesMayFollowOnTheNextLine()
+        public void GetCredential_ValuesMayFollowOnTheNextLine(string password)
         {
-            var filePath = WriteNetRc("machine\ninternal.cache\nlogin\nbuilder\npassword\ncorrect\n");
+            var filePath = WriteNetRc($"machine\ninternal.cache\nlogin\nbuilder\npassword\n{password}\n");
 
             var credential = GetCredential(filePath, "internal.cache");
 
             Assert.Equal("builder", credential.Login);
-            Assert.Equal("correct", credential.Password);
+            Assert.Equal(password, credential.Password);
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void ReadCredentials_HashPasswordDoesNotConsumeTheNextMachine()
+        {
+            var filePath = WriteNetRc("machine internal.cache login builder password #secret # password ignored\nmachine private.service login private-user password private-password\n");
+
+            var credentials = NetRcUtil.ReadCredentials(filePath);
+
+            Assert.Equal(2, credentials.Count);
+            Assert.Equal("builder", credentials["internal.cache"].Login);
+            Assert.Equal("#secret", credentials["internal.cache"].Password);
+            Assert.Equal("private-user", credentials["private.service"].Login);
+            Assert.Equal("private-password", credentials["private.service"].Password);
         }
 
         [Theory]

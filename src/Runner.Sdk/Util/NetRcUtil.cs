@@ -80,9 +80,9 @@ namespace GitHub.Runner.Sdk
                 }
 
                 string token;
-                while ((token = ReadToken(reader)) != null)
+                while ((token = ReadToken(reader, skipComments: true)) != null)
                 {
-                    switch (token)
+                    switch (token.ToLowerInvariant())
                     {
                         case "machine":
                             FlushEntry();
@@ -136,7 +136,8 @@ namespace GitHub.Runner.Sdk
 
         // Double-quoted values follow curl 7.84.0+ escape rules (\n, \r, \t, \", \\).
         // Python's netrc parser and git-credential-netrc use different escape rules.
-        private static string ReadToken(TextReader reader)
+        // Skip comments only between directives; a value beginning with '#' is literal.
+        private static string ReadToken(TextReader reader, bool skipComments = false)
         {
             int next;
             while ((next = reader.Peek()) != -1)
@@ -145,7 +146,7 @@ namespace GitHub.Runner.Sdk
                 {
                     reader.Read();
                 }
-                else if (next == '#')
+                else if (skipComments && next == '#')
                 {
                     reader.ReadLine();
                 }
