@@ -432,13 +432,11 @@ namespace GitHub.Runner.Common.Tests.Worker
         }
 
         [Theory]
-        [InlineData(false, false)]
-        [InlineData(true, false)]
-        [InlineData(false, true)]
-        [InlineData(true, true)]
+        [InlineData(false)]
+        [InlineData(true)]
         [Trait("Level", "L0")]
         [Trait("Category", "Worker")]
-        public async Task PrepareActions_DownloadActionArchive_UnauthorizedRedirectExplainsCredentialsAndRetries(bool withCredentials, bool updateCredentials)
+        public async Task PrepareActions_DownloadActionArchive_UnauthorizedRedirectExplainsCredentialsWithoutRetry(bool withCredentials)
         {
             try
             {
@@ -446,9 +444,57 @@ namespace GitHub.Runner.Common.Tests.Worker
                 using var netrc = new NetRcScope(_hc, withCredentials
                     ? "machine internal.cache login builder password old-password\n"
                     : "default login fallback password fallback-password\n");
-                using var stream = File.OpenRead(await CreateRepoArchive());
+                using var responseBody = new UnreadableRedirectContent();
                 var cacheUri = new Uri("https://internal.cache/archive");
+                int initialRequests = 0;
                 int cacheRequests = 0;
+                var mockClientHandler = new Mock<HttpClientHandler>();
+                mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                    .Returns((HttpRequestMessage request, CancellationToken token) =>
+                    {
+                        if (request.RequestUri == _actionArchiveUri)
+                        {
+                            initialRequests++;
+                            return Task.FromResult(CreateRedirectResponse(cacheUri));
+                        }
+
+                        Assert.Equal(cacheUri, request.RequestUri);
+                        cacheRequests++;
+                        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized) { Content = responseBody });
+                    });
+
+                var error = await Assert.ThrowsAsync<FailedToDownloadActionException>(() => PrepareActionArchiveWithHandlerAsync(mockClientHandler.Object));
+
+                Assert.IsType<NonRetryableException>(error.InnerException);
+                Assert.Equal(1, initialRequests);
+                Assert.Equal(1, cacheRequests);
+                Assert.True(responseBody.IsDisposed);
+                var log = File.ReadAllText(_hc.TraceFileName);
+                Assert.Contains("Action archive redirect host 'internal.cache' returned HTTP 401", log);
+                Assert.Contains(withCredentials ? "The .netrc credentials were rejected" : "No .netrc credentials were sent", log);
+            }
+            finally
+            {
+                Teardown();
+            }
+        }
+
+        [Theory]
+        [InlineData(null, "file does not exist")]
+        [InlineData("machine internal.cache login builder password \"diagnostic-secret", "invalid .netrc syntax")]
+        [InlineData("machine other.cache login builder password diagnostic-secret", null)]
+        [InlineData("default login builder password diagnostic-secret", null)]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Worker")]
+        public async Task PrepareActions_DownloadActionArchive_WarnsOnceForCredentialFileFailures(string contents, string warningReason)
+        {
+            try
+            {
+                Setup();
+                using var netrc = new NetRcScope(_hc, contents);
+                using var stream = File.OpenRead(await CreateRepoArchive());
+                var cacheUri = new Uri("https://internal.cache/start");
+                var finalUri = new Uri("https://internal.cache/final");
                 var mockClientHandler = new Mock<HttpClientHandler>();
                 mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
                     .Returns((HttpRequestMessage request, CancellationToken token) =>
@@ -458,35 +504,54 @@ namespace GitHub.Runner.Common.Tests.Worker
                             return Task.FromResult(CreateRedirectResponse(cacheUri));
                         }
 
-                        Assert.Equal(cacheUri, request.RequestUri);
-                        cacheRequests++;
-                        if (updateCredentials && cacheRequests > 1)
+                        Assert.Null(request.Headers.Authorization);
+                        if (request.RequestUri == cacheUri)
                         {
-                            Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("builder:new-password")), request.Headers.Authorization?.Parameter);
-                            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) });
+                            return Task.FromResult(CreateRedirectResponse(finalUri));
                         }
 
-                        if (updateCredentials)
-                        {
-                            netrc.Write("machine internal.cache login builder password new-password\n");
-                        }
-                        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.Unauthorized) { Content = new UnreadableRedirectContent() });
+                        Assert.Equal(finalUri, request.RequestUri);
+                        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) });
                     });
 
-                if (updateCredentials)
-                {
-                    await PrepareActionArchiveWithHandlerAsync(mockClientHandler.Object);
-                }
-                else
-                {
-                    var error = await Assert.ThrowsAsync<FailedToDownloadActionException>(() => PrepareActionArchiveWithHandlerAsync(mockClientHandler.Object));
-                    Assert.Equal(HttpStatusCode.Unauthorized, Assert.IsType<HttpRequestException>(error.InnerException).StatusCode);
-                }
+                await PrepareActionArchiveWithHandlerAsync(mockClientHandler.Object);
 
-                Assert.Equal(updateCredentials ? 2 : 3, cacheRequests);
                 var log = File.ReadAllText(_hc.TraceFileName);
-                Assert.Contains("Action archive redirect host 'internal.cache' returned HTTP 401", log);
-                Assert.Contains(withCredentials ? "The .netrc credentials were rejected" : "No .netrc credentials were sent", log);
+                Assert.Equal(warningReason == null ? 0 : 1, log.Split("Could not read .netrc file", StringSplitOptions.None).Length - 1);
+                if (warningReason != null)
+                {
+                    Assert.Contains(warningReason, log);
+                }
+                Assert.DoesNotContain("diagnostic-secret", log);
+            }
+            finally
+            {
+                Teardown();
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Worker")]
+        public async Task PrepareActions_DownloadActionArchive_CancellationStopsHeaderWaitWithoutRetry()
+        {
+            try
+            {
+                Setup();
+                int requests = 0;
+                var mockClientHandler = new Mock<HttpClientHandler>();
+                mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                    .Returns((HttpRequestMessage request, CancellationToken token) =>
+                    {
+                        requests++;
+                        _ecTokenSource.Cancel();
+                        Assert.True(token.IsCancellationRequested);
+                        return Task.FromCanceled<HttpResponseMessage>(token);
+                    });
+
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PrepareActionArchiveWithHandlerAsync(mockClientHandler.Object));
+
+                Assert.Equal(1, requests);
             }
             finally
             {

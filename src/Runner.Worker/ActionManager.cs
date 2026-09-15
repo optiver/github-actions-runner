@@ -1708,7 +1708,7 @@ namespace GitHub.Runner.Worker
                         var hint = authHeader == null
                             ? "No .netrc credentials were sent. Configure an explicit machine entry for this host and use HTTPS."
                             : "The .netrc credentials were rejected. Check this host's login and password.";
-                        throw new HttpRequestException($"Action archive redirect host '{requestUri.Host}' returned HTTP 401. {hint}", null, response.StatusCode);
+                        throw new NonRetryableException($"Action archive redirect host '{requestUri.Host}' returned HTTP 401. {hint}");
                     }
                 }
 
@@ -1739,7 +1739,7 @@ namespace GitHub.Runner.Worker
                     }
 
                     Trace.Info($"Download redirected ({(int)response.StatusCode}) to '{GetDownloadUrlForLogging(redirectUri)}'.");
-                    credentials ??= NetRcUtil.ReadCredentials(NetRcUtil.ResolveFilePath());
+                    credentials ??= NetRcUtil.ReadCredentials(NetRcUtil.ResolveFilePath(), Trace.Warning);
                     authHeader = CreateRedirectAuthHeader(redirectUri, credentials);
                     requestUri = redirectUri;
                 }
@@ -1753,7 +1753,7 @@ namespace GitHub.Runner.Worker
             Trace.Info($"Save archive '{displayDownloadUrl}' into {archiveFile}.");
             int retryCount = 0;
 
-            // Allow up to 20 * 60s for any action to be downloaded from github graph.
+            // One timeout covers each attempt, including redirect headers and the streamed archive body.
             int timeoutSeconds = 20 * 60;
             try
             {
@@ -1769,7 +1769,7 @@ namespace GitHub.Runner.Worker
                             //open zip stream in async mode
                             using (FileStream fs = new(archiveFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: _defaultFileStreamBufferSize, useAsync: true))
                             using (var httpClientHandler = HostContext.CreateHttpClientHandler())
-                            using (var httpClient = new HttpClient(httpClientHandler))
+                            using (var httpClient = new HttpClient(httpClientHandler) { Timeout = Timeout.InfiniteTimeSpan })
                             {
                                 // Preserve preemptive authentication for caches that do not issue a Basic challenge.
                                 httpClientHandler.AllowAutoRedirect = false;

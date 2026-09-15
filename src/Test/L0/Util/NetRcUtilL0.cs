@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using GitHub.Runner.Sdk;
 using Xunit;
@@ -226,8 +227,54 @@ machine other.cache login other password otherpw
         public void ReadCredentials_MalformedFileDoesNotReturnPartialCredentials(string password)
         {
             var filePath = WriteNetRc($"machine other.cache login other password otherpw\nmachine internal.cache login builder password {password}");
+            var warnings = new List<string>();
 
-            Assert.Empty(NetRcUtil.ReadCredentials(filePath));
+            Assert.Empty(NetRcUtil.ReadCredentials(filePath, warnings.Add));
+            var warning = Assert.Single(warnings);
+            Assert.Contains(filePath, warning);
+            Assert.Contains("invalid .netrc syntax", warning);
+            Assert.DoesNotContain("otherpw", warning);
+            Assert.DoesNotContain(password, warning);
+        }
+
+        [Theory]
+        [InlineData("missing", "file does not exist")]
+        [InlineData("directory", "access was denied")]
+        [InlineData("invalid", "invalid file path")]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void ReadCredentials_ReportsFileReadFailures(string failure, string expectedReason)
+        {
+            var path = failure switch
+            {
+                "directory" => _tempDirectory,
+                "invalid" => Path.Combine(_tempDirectory, "invalid\0path"),
+                _ => Path.Combine(_tempDirectory, "does-not-exist")
+            };
+            var warnings = new List<string>();
+
+            Assert.Empty(NetRcUtil.ReadCredentials(path, warnings.Add));
+            var warning = Assert.Single(warnings);
+            Assert.Contains(path, warning);
+            Assert.Contains(expectedReason, warning);
+        }
+
+        [Theory]
+        [InlineData(null)]
+        [InlineData("")]
+        [InlineData("machine other.cache login other password otherpw")]
+        [InlineData("default login fallback password fallbackpw")]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void ReadCredentials_NoFileOrMatchingEntryDoesNotWarn(string contents)
+        {
+            var path = contents == null ? null : WriteNetRc(contents);
+            var warnings = new List<string>();
+
+            var credentials = NetRcUtil.ReadCredentials(path, warnings.Add);
+
+            Assert.Null(NetRcUtil.GetCredential(credentials, "internal.cache"));
+            Assert.Empty(warnings);
         }
 
         [Fact]
@@ -255,8 +302,9 @@ machine other.cache login other password otherpw
                 Environment.SetEnvironmentVariable("NETRC", filePath);
                 Assert.Equal(filePath, NetRcUtil.ResolveFilePath());
 
-                Environment.SetEnvironmentVariable("NETRC", Path.Combine(_tempDirectory, "does-not-exist"));
-                Assert.Null(NetRcUtil.ResolveFilePath());
+                var missingFile = Path.Combine(_tempDirectory, "does-not-exist");
+                Environment.SetEnvironmentVariable("NETRC", missingFile);
+                Assert.Equal(missingFile, NetRcUtil.ResolveFilePath());
             }
             finally
             {

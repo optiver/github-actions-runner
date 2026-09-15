@@ -88,13 +88,15 @@ machine internal.cache
   password your-cache-password
 ```
 
-The runner uses the file named by the `NETRC` environment variable, or otherwise `.netrc` in the service account's home directory, falling back to `_netrc`. Set `NETRC` in the runner service's environment before starting it. A configured but missing or unreadable file supplies no credentials.
+The runner uses the file named by the `NETRC` environment variable, or otherwise `.netrc` in the service account's home directory, falling back to `_netrc`. Set `NETRC` in the runner service's environment before starting it. If the configured file is missing, or the selected file is unreadable or malformed, the runner logs a warning and continues without `.netrc` credentials. A valid file without an entry for a redirect host does not trigger a warning.
 
 Machine names match hostnames without a scheme, path, or port, including when the cache uses a nonstandard HTTPS port. `default` entries are ignored. Credentials are sent only over HTTPS, and the original GitHub authorization header is cleared on every redirect. These settings apply to redirected action repository archive downloads.
 
 Double-quoted values follow curl 7.84.0 and later: `\"` and `\\` encode a quote and backslash, while `\n`, `\r`, and `\t` encode newline, carriage return, and tab. Older curl versions do not support quoted values, and Python's `netrc` parser and `git-credential-netrc` interpret escapes differently. Check compatibility with other tools when sharing a file that contains quoted or escaped credentials.
 
-For an HTTP 401 from the cache, the download error distinguishes missing credentials from credentials that were sent and rejected. Check the file location, the matching machine entry, and its login and password. HTTPS-to-HTTP redirects and chains longer than ten redirects fail without retrying.
+For an HTTP 401 from the cache, the download fails immediately and the error distinguishes missing credentials from credentials that were sent and rejected. Check the file location, the matching machine entry, and its login and password. HTTPS-to-HTTP redirects and chains longer than ten redirects also fail without retrying.
+
+Each download attempt has a 20-minute timeout covering the redirect chain and streamed archive body. Cancelling the job also cancels an in-progress download.
 
 ## Still not working?
 

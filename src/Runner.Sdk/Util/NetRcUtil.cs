@@ -28,14 +28,15 @@ namespace GitHub.Runner.Sdk
         /// <summary>
         /// Resolves the credential file: the NETRC environment variable wins,
         /// otherwise ~/.netrc (falling back to ~/_netrc, the spelling some
-        /// Windows tools use). Returns null when no file exists.
+        /// Windows tools use). Returns an explicit NETRC path even if it does
+        /// not exist, so the reader can report a configuration error.
         /// </summary>
         public static string ResolveFilePath()
         {
             var netrcEnv = Environment.GetEnvironmentVariable("NETRC");
             if (!string.IsNullOrEmpty(netrcEnv))
             {
-                return File.Exists(netrcEnv) ? netrcEnv : null;
+                return netrcEnv;
             }
 
             var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
@@ -67,7 +68,7 @@ namespace GitHub.Runner.Sdk
         }
 
         // Read once per download attempt so all redirect hops use the same credential snapshot.
-        public static IReadOnlyDictionary<string, NetRcCredential> ReadCredentials(string filePath)
+        public static IReadOnlyDictionary<string, NetRcCredential> ReadCredentials(string filePath, Action<string> warning = null)
         {
             var machines = new Dictionary<string, NetRcCredential>(StringComparer.OrdinalIgnoreCase);
             if (string.IsNullOrEmpty(filePath))
@@ -131,10 +132,20 @@ namespace GitHub.Runner.Sdk
 
                 FlushEntry();
             }
-            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException || ex is FormatException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or FormatException or ArgumentException or NotSupportedException)
             {
                 // An unreadable or malformed file must not supply partial credentials.
                 machines.Clear();
+                // Exception messages can contain input from the credential file. Report only a safe reason.
+                var reason = ex switch
+                {
+                    FileNotFoundException or DirectoryNotFoundException => "file does not exist",
+                    UnauthorizedAccessException => "access was denied",
+                    FormatException => "invalid .netrc syntax",
+                    ArgumentException or NotSupportedException => "invalid file path",
+                    _ => "an I/O error occurred"
+                };
+                warning?.Invoke($"Could not read .netrc file '{filePath}': {reason}. Continuing without .netrc credentials.");
             }
 
             return machines;
