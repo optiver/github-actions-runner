@@ -92,6 +92,8 @@ The runner uses the file named by the `NETRC` environment variable, or otherwise
 
 Machine names match hostnames without a scheme, path, or port, including when the cache uses a nonstandard HTTPS port. `default` entries are ignored. Credentials are sent only over HTTPS, and the original GitHub authorization header is cleared on every redirect. These settings apply to redirected action repository archive downloads.
 
+Double-quoted values follow curl 7.84.0 and later: `\"` and `\\` encode a quote and backslash, while `\n`, `\r`, and `\t` encode newline, carriage return, and tab. Older curl versions do not support quoted values, and Python's `netrc` parser and `git-credential-netrc` interpret escapes differently. Check compatibility with other tools when sharing a file that contains quoted or escaped credentials.
+
 For an HTTP 401 from the cache, the download error distinguishes missing credentials from credentials that were sent and rejected. Check the file location, the matching machine entry, and its login and password. HTTPS-to-HTTP redirects and chains longer than ten redirects fail without retrying.
 
 ## Still not working?

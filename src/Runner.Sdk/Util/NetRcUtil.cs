@@ -56,11 +56,6 @@ namespace GitHub.Runner.Sdk
             return null;
         }
 
-        public static NetRcCredential GetCredential(string filePath, string host)
-        {
-            return GetCredential(ReadCredentials(filePath), host);
-        }
-
         public static NetRcCredential GetCredential(IReadOnlyDictionary<string, NetRcCredential> credentials, string host)
         {
             if (string.IsNullOrEmpty(host))
@@ -145,6 +140,8 @@ namespace GitHub.Runner.Sdk
             return machines;
         }
 
+        // Double-quoted values follow curl 7.84.0+ escape rules (\n, \r, \t, \", \\).
+        // Python's netrc parser and git-credential-netrc use different escape rules.
         private static string ReadToken(TextReader reader)
         {
             int next;

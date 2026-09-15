@@ -33,6 +33,11 @@ namespace GitHub.Runner.Common.Tests.Util
             return filePath;
         }
 
+        private static NetRcCredential GetCredential(string filePath, string host)
+        {
+            return NetRcUtil.GetCredential(NetRcUtil.ReadCredentials(filePath), host);
+        }
+
         [Fact]
         [Trait("Level", "L0")]
         [Trait("Category", "Common")]
@@ -44,7 +49,7 @@ machine internal.cache
   password hunter2
 ");
 
-            var credential = NetRcUtil.GetCredential(filePath, "internal.cache");
+            var credential = GetCredential(filePath, "internal.cache");
 
             Assert.NotNull(credential);
             Assert.Equal("builder", credential.Login);
@@ -58,8 +63,8 @@ machine internal.cache
         {
             var filePath = WriteNetRc(@"machine one.example.com login a password b machine two.example.com login c password d");
 
-            var one = NetRcUtil.GetCredential(filePath, "one.example.com");
-            var two = NetRcUtil.GetCredential(filePath, "two.example.com");
+            var one = GetCredential(filePath, "one.example.com");
+            var two = GetCredential(filePath, "two.example.com");
 
             Assert.Equal("a", one.Login);
             Assert.Equal("b", one.Password);
@@ -78,9 +83,9 @@ machine internal.cache
             const string DefaultEntry = "default login fallback password everywhere\n";
             var filePath = WriteNetRc(defaultFirst ? DefaultEntry + MachineEntry : MachineEntry + DefaultEntry);
 
-            Assert.Null(NetRcUtil.GetCredential(filePath, "unlisted.example.com"));
-            Assert.Equal("a", NetRcUtil.GetCredential(filePath, "one.example.com").Login);
-            Assert.Equal("b", NetRcUtil.GetCredential(filePath, "one.example.com").Password);
+            Assert.Null(GetCredential(filePath, "unlisted.example.com"));
+            Assert.Equal("a", GetCredential(filePath, "one.example.com").Login);
+            Assert.Equal("b", GetCredential(filePath, "one.example.com").Password);
         }
 
         [Fact]
@@ -100,7 +105,7 @@ machine internal.cache
         {
             var filePath = WriteNetRc(@"machine one.example.com login a password b");
 
-            Assert.Null(NetRcUtil.GetCredential(filePath, "unlisted.example.com"));
+            Assert.Null(GetCredential(filePath, "unlisted.example.com"));
         }
 
         [Fact]
@@ -110,7 +115,7 @@ machine internal.cache
         {
             var filePath = WriteNetRc(@"machine Internal.Cache login a password b");
 
-            Assert.NotNull(NetRcUtil.GetCredential(filePath, "internal.cache"));
+            Assert.NotNull(GetCredential(filePath, "internal.cache"));
         }
 
         [Fact]
@@ -123,7 +128,7 @@ machine one.example.com login first password firstpw
 machine one.example.com login second password secondpw
 ");
 
-            var credential = NetRcUtil.GetCredential(filePath, "one.example.com");
+            var credential = GetCredential(filePath, "one.example.com");
 
             Assert.Equal("first", credential.Login);
             Assert.Equal("firstpw", credential.Password);
@@ -141,8 +146,8 @@ machine bogus.example.com login trap password trap
 machine real.example.com login a password b
 ");
 
-            Assert.Null(NetRcUtil.GetCredential(filePath, "bogus.example.com"));
-            Assert.NotNull(NetRcUtil.GetCredential(filePath, "real.example.com"));
+            Assert.Null(GetCredential(filePath, "bogus.example.com"));
+            Assert.NotNull(GetCredential(filePath, "real.example.com"));
         }
 
         [Fact]
@@ -152,7 +157,7 @@ machine real.example.com login a password b
         {
             var filePath = WriteNetRc(@"machine one.example.com login a");
 
-            Assert.Null(NetRcUtil.GetCredential(filePath, "one.example.com"));
+            Assert.Null(GetCredential(filePath, "one.example.com"));
         }
 
         [Fact]
@@ -160,7 +165,7 @@ machine real.example.com login a password b
         [Trait("Category", "Common")]
         public void GetCredential_MissingFile_ReturnsNull()
         {
-            Assert.Null(NetRcUtil.GetCredential(Path.Combine(_tempDirectory, "does-not-exist"), "one.example.com"));
+            Assert.Null(GetCredential(Path.Combine(_tempDirectory, "does-not-exist"), "one.example.com"));
         }
 
         [Fact]
@@ -175,10 +180,10 @@ machine internal.cache login builder password correct # password obsolete
 machine other.cache login other password otherpw
 ");
 
-            var credential = NetRcUtil.GetCredential(filePath, "internal.cache");
+            var credential = GetCredential(filePath, "internal.cache");
             Assert.Equal("builder", credential.Login);
             Assert.Equal("correct", credential.Password);
-            Assert.Equal("otherpw", NetRcUtil.GetCredential(filePath, "other.cache").Password);
+            Assert.Equal("otherpw", GetCredential(filePath, "other.cache").Password);
         }
 
         [Theory]
@@ -193,7 +198,7 @@ machine other.cache login other password otherpw
         {
             var filePath = WriteNetRc($"machine internal.cache login \"build user\" password {encodedPassword}\n");
 
-            var credential = NetRcUtil.GetCredential(filePath, "internal.cache");
+            var credential = GetCredential(filePath, "internal.cache");
 
             Assert.Equal("build user", credential.Login);
             Assert.Equal(expectedPassword, credential.Password);
@@ -206,7 +211,7 @@ machine other.cache login other password otherpw
         {
             var filePath = WriteNetRc("machine\ninternal.cache\nlogin\nbuilder\npassword\ncorrect\n");
 
-            var credential = NetRcUtil.GetCredential(filePath, "internal.cache");
+            var credential = GetCredential(filePath, "internal.cache");
 
             Assert.Equal("builder", credential.Login);
             Assert.Equal("correct", credential.Password);
@@ -235,7 +240,7 @@ machine other.cache login other password otherpw
             File.WriteAllText(filePath, "machine internal.cache login builder password rotated");
 
             Assert.Equal("original", NetRcUtil.GetCredential(credentials, "internal.cache").Password);
-            Assert.Equal("rotated", NetRcUtil.GetCredential(filePath, "internal.cache").Password);
+            Assert.Equal("rotated", GetCredential(filePath, "internal.cache").Password);
         }
 
         [Fact]

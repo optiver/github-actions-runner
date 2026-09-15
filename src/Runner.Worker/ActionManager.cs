@@ -1713,9 +1713,11 @@ namespace GitHub.Runner.Worker
                 }
 
                 // Match HttpClientHandler's redirect status codes, including HTTP 300.
-                if (response.Headers.Location == null || response.StatusCode is not
+                var location = response.Headers.Location;
+                var isRedirect = location != null && response.StatusCode is
                     (HttpStatusCode.MultipleChoices or HttpStatusCode.MovedPermanently or HttpStatusCode.Found or
-                     HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect))
+                     HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect);
+                if (!isRedirect)
                 {
                     // The caller owns the final response; intermediate responses are disposed below.
                     return response;
@@ -1728,9 +1730,10 @@ namespace GitHub.Runner.Worker
                         throw new NonRetryableException($"Exceeded the maximum of {_maxDownloadRedirects} redirects while downloading '{GetDownloadUrlForLogging(requestUri)}'.");
                     }
 
-                    var redirectUri = new Uri(requestUri, response.Headers.Location);
-                    if ((redirectUri.Scheme != Uri.UriSchemeHttp && redirectUri.Scheme != Uri.UriSchemeHttps) ||
-                        (requestUri.Scheme == Uri.UriSchemeHttps && redirectUri.Scheme != Uri.UriSchemeHttps))
+                    var redirectUri = new Uri(requestUri, location);
+                    var isUnsupportedScheme = redirectUri.Scheme != Uri.UriSchemeHttp && redirectUri.Scheme != Uri.UriSchemeHttps;
+                    var isHttpsDowngrade = requestUri.Scheme == Uri.UriSchemeHttps && redirectUri.Scheme != Uri.UriSchemeHttps;
+                    if (isUnsupportedScheme || isHttpsDowngrade)
                     {
                         throw new NonRetryableException($"Refusing an insecure or unsupported action archive redirect to '{GetDownloadUrlForLogging(redirectUri)}'.");
                     }
@@ -1772,16 +1775,18 @@ namespace GitHub.Runner.Worker
                                 httpClientHandler.AllowAutoRedirect = false;
 
                                 httpClient.DefaultRequestHeaders.UserAgent.AddRange(HostContext.UserAgents);
-                                using (var response = await GetArchiveResponseAsync(httpClient, downloadUri, CreateAuthHeader(executionContext, downloadUrl, downloadAuthToken), actionDownloadCancellation.Token))
+                                var authHeader = CreateAuthHeader(executionContext, downloadUrl, downloadAuthToken);
+                                var cancellationToken = actionDownloadCancellation.Token;
+                                using (var response = await GetArchiveResponseAsync(httpClient, downloadUri, authHeader, cancellationToken))
                                 {
                                     requestId = UrlUtil.GetGitHubRequestId(response.Headers);
 
                                     if (response.IsSuccessStatusCode)
                                     {
-                                        using (var result = await response.Content.ReadAsStreamAsync(actionDownloadCancellation.Token))
+                                        using (var result = await response.Content.ReadAsStreamAsync(cancellationToken))
                                         {
-                                            await result.CopyToAsync(fs, _defaultCopyBufferSize, actionDownloadCancellation.Token);
-                                            await fs.FlushAsync(actionDownloadCancellation.Token);
+                                            await result.CopyToAsync(fs, _defaultCopyBufferSize, cancellationToken);
+                                            await fs.FlushAsync(cancellationToken);
 
                                             // download succeed, break out the retry loop.
                                             break;
