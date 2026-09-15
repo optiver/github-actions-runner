@@ -19,19 +19,16 @@ namespace GitHub.Runner.Sdk
     }
 
     /// <summary>
-    /// Minimal reader for the standard .netrc credential file, matching the
-    /// lookup behavior other HTTP clients on the host (e.g. curl) already
-    /// honour. Used to authenticate archive downloads that get redirected to
-    /// hosts (such as enterprise caching servers) the runner holds no service
-    /// credential for.
+    /// Reads explicit machine credentials for action archive redirect hosts.
+    /// Default entries are ignored so redirects cannot send a fallback password
+    /// to an unlisted host. Machine names are hostnames without ports.
     /// </summary>
     public static class NetRcUtil
     {
         /// <summary>
-        /// Resolves the credential file the same way curl does: the NETRC
-        /// environment variable wins, otherwise ~/.netrc (falling back to
-        /// ~/_netrc, the spelling some Windows tools use). Returns null when
-        /// no file exists.
+        /// Resolves the credential file: the NETRC environment variable wins,
+        /// otherwise ~/.netrc (falling back to ~/_netrc, the spelling some
+        /// Windows tools use). Returns null when no file exists.
         /// </summary>
         public static string ResolveFilePath()
         {
@@ -59,11 +56,6 @@ namespace GitHub.Runner.Sdk
             return null;
         }
 
-        public static NetRcCredential GetCredential(string host)
-        {
-            return GetCredential(ResolveFilePath(), host);
-        }
-
         public static NetRcCredential GetCredential(string filePath, string host)
         {
             return GetCredential(ReadCredentials(filePath), host);
@@ -76,13 +68,10 @@ namespace GitHub.Runner.Sdk
                 return null;
             }
 
-            return credentials.TryGetValue(host, out var credential) || credentials.TryGetValue(string.Empty, out credential)
-                ? credential
-                : null;
+            return credentials.TryGetValue(host, out var credential) ? credential : null;
         }
 
-        // An empty machine name represents the default entry. Read once per
-        // download attempt so all redirect hops use the same credential snapshot.
+        // Read once per download attempt so all redirect hops use the same credential snapshot.
         public static IReadOnlyDictionary<string, NetRcCredential> ReadCredentials(string filePath)
         {
             var machines = new Dictionary<string, NetRcCredential>(StringComparer.OrdinalIgnoreCase);
@@ -100,7 +89,7 @@ namespace GitHub.Runner.Sdk
 
                 void FlushEntry()
                 {
-                    if (currentMachine != null && password != null)
+                    if (!string.IsNullOrEmpty(currentMachine) && password != null)
                     {
                         // First matching entry wins, as with other .netrc consumers.
                         machines.TryAdd(currentMachine, new NetRcCredential(login ?? string.Empty, password));
@@ -119,14 +108,10 @@ namespace GitHub.Runner.Sdk
                         case "machine":
                             FlushEntry();
                             currentMachine = ReadToken(reader);
-                            if (currentMachine == string.Empty)
-                            {
-                                currentMachine = null;
-                            }
                             break;
                         case "default":
+                            // End the previous machine entry without accepting fallback credentials.
                             FlushEntry();
-                            currentMachine = string.Empty;
                             break;
                         case "login":
                             login = ReadToken(reader);

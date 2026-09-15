@@ -1656,6 +1656,18 @@ namespace GitHub.Runner.Worker
             return sanitized.Uri.GetLeftPart(UriPartial.Path);
         }
 
+        private void MaskDownloadUrlSecrets(Uri uri)
+        {
+            // Uri.ToString() uses SafeUnescaped, which can differ from both the wire and decoded forms.
+            foreach (var component in new[] { UriComponents.Query, UriComponents.Fragment, UriComponents.UserInfo })
+            {
+                foreach (var format in new[] { UriFormat.UriEscaped, UriFormat.Unescaped, UriFormat.SafeUnescaped })
+                {
+                    HostContext.SecretMasker.AddValue(uri.GetComponents(component, format));
+                }
+            }
+        }
+
         private AuthenticationHeaderValue CreateRedirectAuthHeader(Uri redirectUri, IReadOnlyDictionary<string, NetRcCredential> credentials)
         {
             // Never send .netrc passwords over an unencrypted connection.
@@ -1678,21 +1690,29 @@ namespace GitHub.Runner.Worker
             IReadOnlyDictionary<string, NetRcCredential> credentials = null;
             for (int redirectCount = 0; ; redirectCount++)
             {
-                // Also protect URLs included in exceptions raised by the HTTP handler.
-                foreach (var secret in new[] { requestUri.Query, requestUri.Fragment, requestUri.UserInfo })
-                {
-                    HostContext.SecretMasker.AddValue(secret);
-                    HostContext.SecretMasker.AddValue(Uri.UnescapeDataString(secret));
-                }
+                MaskDownloadUrlSecrets(requestUri);
                 using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
                 request.Headers.Authorization = authHeader;
-                var response = await httpClient.SendAsync(request, cancellationToken);
+                // Redirect bodies are irrelevant; stream the final archive instead of buffering it in memory.
+                var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
                 var requestId = UrlUtil.GetGitHubRequestId(response.Headers);
                 if (!string.IsNullOrEmpty(requestId))
                 {
                     Trace.Info($"Request URL: {GetDownloadUrlForLogging(requestUri)} X-GitHub-Request-Id: {requestId} Http Status: {response.StatusCode}");
                 }
 
+                if (redirectCount > 0 && response.StatusCode == HttpStatusCode.Unauthorized)
+                {
+                    using (response)
+                    {
+                        var hint = authHeader == null
+                            ? "No .netrc credentials were sent. Configure an explicit machine entry for this host and use HTTPS."
+                            : "The .netrc credentials were rejected. Check this host's login and password.";
+                        throw new HttpRequestException($"Action archive redirect host '{requestUri.Host}' returned HTTP 401. {hint}", null, response.StatusCode);
+                    }
+                }
+
+                // Match HttpClientHandler's redirect status codes, including HTTP 300.
                 if (response.Headers.Location == null || response.StatusCode is not
                     (HttpStatusCode.MultipleChoices or HttpStatusCode.MovedPermanently or HttpStatusCode.Found or
                      HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect))
@@ -1705,14 +1725,14 @@ namespace GitHub.Runner.Worker
                 {
                     if (redirectCount >= _maxDownloadRedirects)
                     {
-                        throw new HttpRequestException($"Exceeded the maximum of {_maxDownloadRedirects} redirects while downloading '{GetDownloadUrlForLogging(requestUri)}'.");
+                        throw new NonRetryableException($"Exceeded the maximum of {_maxDownloadRedirects} redirects while downloading '{GetDownloadUrlForLogging(requestUri)}'.");
                     }
 
                     var redirectUri = new Uri(requestUri, response.Headers.Location);
                     if ((redirectUri.Scheme != Uri.UriSchemeHttp && redirectUri.Scheme != Uri.UriSchemeHttps) ||
                         (requestUri.Scheme == Uri.UriSchemeHttps && redirectUri.Scheme != Uri.UriSchemeHttps))
                     {
-                        throw new HttpRequestException($"Refusing an insecure or unsupported action archive redirect to '{GetDownloadUrlForLogging(redirectUri)}'.");
+                        throw new NonRetryableException($"Refusing an insecure or unsupported action archive redirect to '{GetDownloadUrlForLogging(redirectUri)}'.");
                     }
 
                     Trace.Info($"Download redirected ({(int)response.StatusCode}) to '{GetDownloadUrlForLogging(redirectUri)}'.");
@@ -1758,7 +1778,7 @@ namespace GitHub.Runner.Worker
 
                                     if (response.IsSuccessStatusCode)
                                     {
-                                        using (var result = await response.Content.ReadAsStreamAsync())
+                                        using (var result = await response.Content.ReadAsStreamAsync(actionDownloadCancellation.Token))
                                         {
                                             await result.CopyToAsync(fs, _defaultCopyBufferSize, actionDownloadCancellation.Token);
                                             await fs.FlushAsync(actionDownloadCancellation.Token);
@@ -1813,7 +1833,7 @@ namespace GitHub.Runner.Worker
                             Trace.Info($"Access denied to '{displayDownloadUrl}'");
                             throw;
                         }
-                        catch (Exception ex) when (retryCount < 2)
+                        catch (Exception ex) when (retryCount < 2 && ex is not NonRetryableException)
                         {
                             retryCount++;
                             Trace.Error($"Fail to download archive '{displayDownloadUrl}' -- Attempt: {retryCount}");

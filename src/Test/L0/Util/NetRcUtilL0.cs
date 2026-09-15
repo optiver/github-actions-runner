@@ -67,21 +67,30 @@ machine internal.cache
             Assert.Equal("d", two.Password);
         }
 
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Common")]
+        public void GetCredential_IgnoresDefaultEntries(bool defaultFirst)
+        {
+            const string MachineEntry = "machine one.example.com login a password b\n";
+            const string DefaultEntry = "default login fallback password everywhere\n";
+            var filePath = WriteNetRc(defaultFirst ? DefaultEntry + MachineEntry : MachineEntry + DefaultEntry);
+
+            Assert.Null(NetRcUtil.GetCredential(filePath, "unlisted.example.com"));
+            Assert.Equal("a", NetRcUtil.GetCredential(filePath, "one.example.com").Login);
+            Assert.Equal("b", NetRcUtil.GetCredential(filePath, "one.example.com").Password);
+        }
+
         [Fact]
         [Trait("Level", "L0")]
         [Trait("Category", "Common")]
-        public void GetCredential_DefaultEntryFallback()
+        public void ReadCredentials_DefaultOnlyDoesNotSupplyCredentials()
         {
-            var filePath = WriteNetRc(@"
-machine one.example.com login a password b
-default login fallback password everywhere
-");
+            var filePath = WriteNetRc("default login fallback password everywhere\n");
 
-            var credential = NetRcUtil.GetCredential(filePath, "unlisted.example.com");
-
-            Assert.NotNull(credential);
-            Assert.Equal("fallback", credential.Login);
-            Assert.Equal("everywhere", credential.Password);
+            Assert.Empty(NetRcUtil.ReadCredentials(filePath));
         }
 
         [Fact]
@@ -211,7 +220,7 @@ machine other.cache login other password otherpw
         [Trait("Category", "Common")]
         public void ReadCredentials_MalformedFileDoesNotReturnPartialCredentials(string password)
         {
-            var filePath = WriteNetRc($"default login fallback password fallbackpw\nmachine internal.cache login builder password {password}");
+            var filePath = WriteNetRc($"machine other.cache login other password otherpw\nmachine internal.cache login builder password {password}");
 
             Assert.Empty(NetRcUtil.ReadCredentials(filePath));
         }
