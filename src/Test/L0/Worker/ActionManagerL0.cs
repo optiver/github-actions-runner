@@ -457,9 +457,8 @@ namespace GitHub.Runner.Common.Tests.Worker
                 Assert.Equal(1, initialRequests);
                 Assert.Equal(1, cacheRequests);
                 Assert.True(responseBody.IsDisposed);
-                var log = File.ReadAllText(_hc.TraceFileName);
-                Assert.Contains("Action archive redirect host 'internal.cache' returned HTTP 401", log);
-                Assert.Contains(withCredentials ? "The .netrc credentials were rejected" : "No .netrc credentials were sent", log);
+                Assert.Contains("Action archive redirect host 'internal.cache' returned HTTP 401", error.Message);
+                Assert.Contains(withCredentials ? "The .netrc credentials were rejected" : "No .netrc credentials were sent", error.Message);
             }
             finally
             {
@@ -504,6 +503,9 @@ namespace GitHub.Runner.Common.Tests.Worker
 
                 await PrepareActionArchiveWithHandlerAsync(mockClientHandler.Object);
 
+                _ec.Verify(x => x.AddIssue(
+                    It.Is<Issue>(issue => issue.Type == IssueType.Warning && issue.Message.Contains("Could not read .netrc file")),
+                    It.IsAny<ExecutionContextLogOptions>()), Times.Exactly(warningReason == null ? 0 : 1));
                 var log = File.ReadAllText(_hc.TraceFileName);
                 Assert.Equal(warningReason == null ? 0 : 1, log.Split("Could not read .netrc file", StringSplitOptions.None).Length - 1);
                 if (warningReason != null)
@@ -511,6 +513,35 @@ namespace GitHub.Runner.Common.Tests.Worker
                     Assert.Contains(warningReason, log);
                 }
                 Assert.DoesNotContain("diagnostic-secret", log);
+            }
+            finally
+            {
+                Teardown();
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Worker")]
+        public async Task PrepareActions_DownloadActionArchive_HeaderTimeoutRetriesAndExplainsFailure()
+        {
+            try
+            {
+                Setup();
+                int requests = 0;
+                var mockClientHandler = new Mock<HttpClientHandler>();
+                mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+                    .Returns((HttpRequestMessage request, CancellationToken token) =>
+                    {
+                        requests++;
+                        return Task.FromException<HttpResponseMessage>(new TaskCanceledException("Simulated response-header timeout."));
+                    });
+
+                var error = await Assert.ThrowsAsync<FailedToDownloadActionException>(() => PrepareActionArchiveWithHandlerAsync(mockClientHandler.Object));
+
+                Assert.Equal(3, requests);
+                Assert.IsType<TimeoutException>(error.InnerException);
+                Assert.Contains("Timed out waiting for action archive response headers", error.Message);
             }
             finally
             {

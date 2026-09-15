@@ -1676,7 +1676,7 @@ namespace GitHub.Runner.Worker
             return new AuthenticationHeaderValue("Basic", base64EncodingToken);
         }
 
-        private async Task<HttpResponseMessage> GetArchiveResponseAsync(HttpClient httpClient, Uri requestUri, AuthenticationHeaderValue authHeader, CancellationToken cancellationToken)
+        private async Task<HttpResponseMessage> GetArchiveResponseAsync(IExecutionContext executionContext, HttpClient httpClient, Uri requestUri, AuthenticationHeaderValue authHeader, CancellationToken cancellationToken)
         {
             IReadOnlyDictionary<string, NetRcCredential> credentials = null;
             for (int redirectCount = 0; ; redirectCount++)
@@ -1685,7 +1685,15 @@ namespace GitHub.Runner.Worker
                 using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
                 request.Headers.Authorization = authHeader;
                 // Redirect bodies are irrelevant; stream the final archive instead of buffering it in memory.
-                var response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                HttpResponseMessage response;
+                try
+                {
+                    response = await httpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+                }
+                catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"Timed out waiting for action archive response headers from '{GetDownloadUrlForLogging(requestUri)}'.", ex);
+                }
                 var requestId = UrlUtil.GetGitHubRequestId(response.Headers);
                 if (!string.IsNullOrEmpty(requestId))
                 {
@@ -1729,7 +1737,7 @@ namespace GitHub.Runner.Worker
                     }
 
                     Trace.Info($"Download redirected ({(int)response.StatusCode}) to '{GetDownloadUrlForLogging(redirectUri)}'.");
-                    credentials ??= NetRcUtil.ReadCredentials(NetRcUtil.ResolveFilePath(), Trace.Warning);
+                    credentials ??= NetRcUtil.ReadCredentials(NetRcUtil.ResolveFilePath(), executionContext.Warning);
                     authHeader = CreateRedirectAuthHeader(redirectUri, credentials);
                     requestUri = redirectUri;
                 }
@@ -1759,7 +1767,8 @@ namespace GitHub.Runner.Worker
                             //open zip stream in async mode
                             using (FileStream fs = new(archiveFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: _defaultFileStreamBufferSize, useAsync: true))
                             using (var httpClientHandler = HostContext.CreateHttpClientHandler())
-                            using (var httpClient = new HttpClient(httpClientHandler) { Timeout = Timeout.InfiniteTimeSpan })
+                            // With ResponseHeadersRead, the default 100-second timeout applies to each header wait only.
+                            using (var httpClient = new HttpClient(httpClientHandler))
                             {
                                 // Handle redirects explicitly so each host receives only its own credentials.
                                 httpClientHandler.AllowAutoRedirect = false;
@@ -1767,7 +1776,7 @@ namespace GitHub.Runner.Worker
                                 httpClient.DefaultRequestHeaders.UserAgent.AddRange(HostContext.UserAgents);
                                 var authHeader = CreateAuthHeader(executionContext, downloadUrl, downloadAuthToken);
                                 var cancellationToken = actionDownloadCancellation.Token;
-                                using (var response = await GetArchiveResponseAsync(httpClient, downloadUri, authHeader, cancellationToken))
+                                using (var response = await GetArchiveResponseAsync(executionContext, httpClient, downloadUri, authHeader, cancellationToken))
                                 {
                                     requestId = UrlUtil.GetGitHubRequestId(response.Headers);
 
@@ -1862,7 +1871,7 @@ namespace GitHub.Runner.Worker
             {
                 Trace.Error($"Failed to download archive '{displayDownloadUrl}' after {retryCount + 1} attempts.");
                 Trace.Error(ex);
-                throw new FailedToDownloadActionException($"Failed to download archive '{displayDownloadUrl}' after {retryCount + 1} attempts.", ex);
+                throw new FailedToDownloadActionException($"Failed to download archive '{displayDownloadUrl}' after {retryCount + 1} attempts. {ex.Message}", ex);
             }
 
             ArgUtil.NotNullOrEmpty(archiveFile, nameof(archiveFile));
