@@ -5,17 +5,11 @@ using System.Text;
 
 namespace GitHub.Runner.Sdk
 {
-    public sealed class NetRcCredential
+    public sealed class NetRcCredential(string login, string password)
     {
-        public NetRcCredential(string login, string password)
-        {
-            Login = login;
-            Password = password;
-        }
+        public string Login { get; } = login;
 
-        public string Login { get; }
-
-        public string Password { get; }
+        public string Password { get; } = password;
     }
 
     /// <summary>
@@ -57,17 +51,6 @@ namespace GitHub.Runner.Sdk
             return null;
         }
 
-        public static NetRcCredential GetCredential(IReadOnlyDictionary<string, NetRcCredential> credentials, string host)
-        {
-            if (string.IsNullOrEmpty(host))
-            {
-                return null;
-            }
-
-            return credentials.TryGetValue(host, out var credential) ? credential : null;
-        }
-
-        // Read once per download attempt so all redirect hops use the same credential snapshot.
         public static IReadOnlyDictionary<string, NetRcCredential> ReadCredentials(string filePath, Action<string> warning = null)
         {
             var machines = new Dictionary<string, NetRcCredential>(StringComparer.OrdinalIgnoreCase);

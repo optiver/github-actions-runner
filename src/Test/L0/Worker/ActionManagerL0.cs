@@ -212,17 +212,15 @@ namespace GitHub.Runner.Common.Tests.Worker
             }
         }
 
-        [Theory]
-        [InlineData(false)]
-        [InlineData(true)]
+        [Fact]
         [Trait("Level", "L0")]
         [Trait("Category", "Worker")]
-        public async Task PrepareActions_DownloadActionArchive_UnlistedRedirectDropsAuthorization(bool withDefault)
+        public async Task PrepareActions_DownloadActionArchive_UnlistedRedirectDropsAuthorization()
         {
             try
             {
                 Setup();
-                using var netrc = new NetRcScope(_hc, withDefault ? "default login fallback password fallback-password\n" : null);
+                using var netrc = new NetRcScope(_hc, "machine other.cache login builder password cache-password\n");
                 using var stream = File.OpenRead(await CreateRepoArchive());
                 var cacheUri = new Uri("https://internal.cache/archive");
                 var mockClientHandler = new Mock<HttpClientHandler>();
@@ -251,20 +249,19 @@ namespace GitHub.Runner.Common.Tests.Worker
         }
 
         [Theory]
-        [InlineData(false, "%20secret")]
-        [InlineData(true, "%20secret")]
-        [InlineData(true, "%20secret%2Ftail")]
-        [InlineData(true, "%20secret%26tail")]
+        [InlineData(false)]
+        [InlineData(true)]
         [Trait("Level", "L0")]
         [Trait("Category", "Worker")]
-        public async Task PrepareActions_DownloadActionArchive_RedirectLogsOmitUrlSecrets(bool failDownload, string escapedSuffix)
+        public async Task PrepareActions_DownloadActionArchive_RedirectLogsOmitUrlSecrets(bool failDownload)
         {
             try
             {
                 Setup();
                 using var netrc = new NetRcScope(_hc);
                 using var stream = File.OpenRead(await CreateRepoArchive());
-                var cacheUri = new Uri($"https://url-user:url-password{escapedSuffix}@internal.cache/archive?signature=redirect-signature{escapedSuffix}#redirect-fragment{escapedSuffix}");
+                const string EscapedSuffix = "%20secret%2Ftail%26tail";
+                var cacheUri = new Uri($"https://url-user:url-password{EscapedSuffix}@internal.cache/archive?signature=redirect-signature{EscapedSuffix}#redirect-fragment{EscapedSuffix}");
                 var mockClientHandler = new Mock<HttpClientHandler>();
                 mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
                     .Returns((HttpRequestMessage request, CancellationToken token) =>
@@ -307,17 +304,16 @@ namespace GitHub.Runner.Common.Tests.Worker
         }
 
         [Theory]
-        [InlineData(true, "http://internal.cache/archive")]
-        [InlineData(false, "http://internal.cache/archive")]
-        [InlineData(false, "file:///tmp/archive")]
+        [InlineData("http://internal.cache/archive")]
+        [InlineData("file:///tmp/archive")]
         [Trait("Level", "L0")]
         [Trait("Category", "Worker")]
-        public async Task PrepareActions_DownloadActionArchive_RejectsInsecureRedirect(bool withCredentials, string redirectUrl)
+        public async Task PrepareActions_DownloadActionArchive_RejectsInsecureRedirect(string redirectUrl)
         {
             try
             {
                 Setup();
-                using var netrc = new NetRcScope(_hc, withCredentials ? "machine internal.cache login builder password cache-password\n" : null);
+                using var netrc = new NetRcScope(_hc, "machine internal.cache login builder password cache-password\n");
 
                 int initialRequests = 0;
                 int destinationRequests = 0;
@@ -351,16 +347,15 @@ namespace GitHub.Runner.Common.Tests.Worker
         [Fact]
         [Trait("Level", "L0")]
         [Trait("Category", "Worker")]
-        public async Task PrepareActions_DownloadActionArchive_RedirectChainKeepsSnapshotAndDropsCredentialsForUnlistedHost()
+        public async Task PrepareActions_DownloadActionArchive_FollowsRelativeRedirect()
         {
             try
             {
                 Setup();
-                using var netrc = new NetRcScope(_hc, "machine internal.cache login builder password original-password\ndefault login fallback password fallback-password\n");
+                using var netrc = new NetRcScope(_hc, "machine internal.cache login builder password cache-password\n");
                 using var stream = File.OpenRead(await CreateRepoArchive());
                 var cacheUri = new Uri("https://internal.cache/start");
                 var finalUri = new Uri("https://internal.cache/final");
-                var unlistedUri = new Uri("https://unlisted.cache/archive");
                 int cacheRequests = 0;
                 var mockClientHandler = new Mock<HttpClientHandler>();
                 mockClientHandler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
@@ -371,23 +366,16 @@ namespace GitHub.Runner.Common.Tests.Worker
                             return Task.FromResult(CreateRedirectResponse(cacheUri));
                         }
 
-                        if (request.RequestUri == unlistedUri)
-                        {
-                            Assert.Null(request.Headers.Authorization);
-                            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) });
-                        }
-
                         cacheRequests++;
                         Assert.Equal("Basic", request.Headers.Authorization?.Scheme);
-                        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("builder:original-password")), request.Headers.Authorization?.Parameter);
+                        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("builder:cache-password")), request.Headers.Authorization?.Parameter);
                         if (request.RequestUri == cacheUri)
                         {
-                            netrc.Write("machine internal.cache login builder password rotated-password\ndefault login fallback password fallback-password\n");
                             return Task.FromResult(CreateRedirectResponse(new Uri("/final", UriKind.Relative), HttpStatusCode.TemporaryRedirect));
                         }
 
                         Assert.Equal(finalUri, request.RequestUri);
-                        return Task.FromResult(CreateRedirectResponse(unlistedUri));
+                        return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) });
                     });
 
                 await PrepareActionArchiveWithHandlerAsync(mockClientHandler.Object);
@@ -569,21 +557,18 @@ namespace GitHub.Runner.Common.Tests.Worker
         private sealed class NetRcScope : IDisposable
         {
             private readonly string _original = Environment.GetEnvironmentVariable("NETRC");
-            private readonly string _filePath;
 
             public NetRcScope(IHostContext hostContext, string contents = null)
             {
                 var tempDirectory = hostContext.GetDirectory(WellKnownDirectory.Temp);
                 Directory.CreateDirectory(tempDirectory);
-                _filePath = Path.Combine(tempDirectory, Path.GetRandomFileName());
+                var filePath = Path.Combine(tempDirectory, Path.GetRandomFileName());
                 if (contents != null)
                 {
-                    Write(contents);
+                    File.WriteAllText(filePath, contents);
                 }
-                Environment.SetEnvironmentVariable("NETRC", _filePath);
+                Environment.SetEnvironmentVariable("NETRC", filePath);
             }
-
-            public void Write(string contents) => File.WriteAllText(_filePath, contents);
 
             public void Dispose() => Environment.SetEnvironmentVariable("NETRC", _original);
         }

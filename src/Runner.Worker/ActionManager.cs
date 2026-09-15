@@ -54,7 +54,6 @@ namespace GitHub.Runner.Worker
         //81920 is the default used by System.IO.Stream.CopyTo and is under the large object heap threshold (85k).
         private const int _defaultCopyBufferSize = 81920;
 
-        // Maximum redirect hops to follow when downloading an action archive.
         private const int _maxDownloadRedirects = 10;
 
         private readonly Dictionary<Guid, ContainerInfo> _cachedActionContainers = new();
@@ -1646,14 +1645,7 @@ namespace GitHub.Runner.Worker
 
         private static string GetDownloadUrlForLogging(Uri uri)
         {
-            var sanitized = new UriBuilder(uri)
-            {
-                Query = string.Empty,
-                Fragment = string.Empty,
-                UserName = string.Empty,
-                Password = string.Empty
-            };
-            return sanitized.Uri.GetLeftPart(UriPartial.Path);
+            return uri.GetComponents(UriComponents.SchemeAndServer | UriComponents.Path, UriFormat.UriEscaped);
         }
 
         private void MaskDownloadUrlSecrets(Uri uri)
@@ -1671,8 +1663,7 @@ namespace GitHub.Runner.Worker
         private AuthenticationHeaderValue CreateRedirectAuthHeader(Uri redirectUri, IReadOnlyDictionary<string, NetRcCredential> credentials)
         {
             // Never send .netrc passwords over an unencrypted connection.
-            var credential = redirectUri.Scheme == Uri.UriSchemeHttps ? NetRcUtil.GetCredential(credentials, redirectUri.Host) : null;
-            if (credential == null)
+            if (redirectUri.Scheme != Uri.UriSchemeHttps || !credentials.TryGetValue(redirectUri.Host, out var credential))
             {
                 // The initial Authorization header is never forwarded to a redirect target.
                 return null;
@@ -1719,7 +1710,6 @@ namespace GitHub.Runner.Worker
                      HttpStatusCode.SeeOther or HttpStatusCode.TemporaryRedirect or HttpStatusCode.PermanentRedirect);
                 if (!isRedirect)
                 {
-                    // The caller owns the final response; intermediate responses are disposed below.
                     return response;
                 }
 
@@ -1771,7 +1761,7 @@ namespace GitHub.Runner.Worker
                             using (var httpClientHandler = HostContext.CreateHttpClientHandler())
                             using (var httpClient = new HttpClient(httpClientHandler) { Timeout = Timeout.InfiniteTimeSpan })
                             {
-                                // Preserve preemptive authentication for caches that do not issue a Basic challenge.
+                                // Handle redirects explicitly so each host receives only its own credentials.
                                 httpClientHandler.AllowAutoRedirect = false;
 
                                 httpClient.DefaultRequestHeaders.UserAgent.AddRange(HostContext.UserAgents);

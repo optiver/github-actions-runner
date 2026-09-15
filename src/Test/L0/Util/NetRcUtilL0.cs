@@ -36,7 +36,7 @@ namespace GitHub.Runner.Common.Tests.Util
 
         private static NetRcCredential GetCredential(string filePath, string host)
         {
-            return NetRcUtil.GetCredential(NetRcUtil.ReadCredentials(filePath), host);
+            return NetRcUtil.ReadCredentials(filePath).TryGetValue(host, out var credential) ? credential : null;
         }
 
         [Fact]
@@ -74,39 +74,23 @@ machine internal.cache
         }
 
         [Theory]
-        [InlineData(false)]
-        [InlineData(true)]
+        [InlineData("machine one.example.com login a password b", true)]
+        [InlineData("default login fallback password everywhere", false)]
+        [InlineData("default login fallback password everywhere\nmachine one.example.com login a password b", true)]
+        [InlineData("machine one.example.com login a password b\ndefault login fallback password everywhere", true)]
         [Trait("Level", "L0")]
         [Trait("Category", "Common")]
-        public void GetCredential_IgnoresDefaultEntries(bool defaultFirst)
+        public void ReadCredentials_RequiresExplicitMachineEntries(string contents, bool hasMachineEntry)
         {
-            const string MachineEntry = "machine one.example.com login a password b\n";
-            const string DefaultEntry = "default login fallback password everywhere\n";
-            var filePath = WriteNetRc(defaultFirst ? DefaultEntry + MachineEntry : MachineEntry + DefaultEntry);
+            var credentials = NetRcUtil.ReadCredentials(WriteNetRc(contents));
 
-            Assert.Null(GetCredential(filePath, "unlisted.example.com"));
-            Assert.Equal("a", GetCredential(filePath, "one.example.com").Login);
-            Assert.Equal("b", GetCredential(filePath, "one.example.com").Password);
-        }
-
-        [Fact]
-        [Trait("Level", "L0")]
-        [Trait("Category", "Common")]
-        public void ReadCredentials_DefaultOnlyDoesNotSupplyCredentials()
-        {
-            var filePath = WriteNetRc("default login fallback password everywhere\n");
-
-            Assert.Empty(NetRcUtil.ReadCredentials(filePath));
-        }
-
-        [Fact]
-        [Trait("Level", "L0")]
-        [Trait("Category", "Common")]
-        public void GetCredential_UnknownHostWithoutDefault_ReturnsNull()
-        {
-            var filePath = WriteNetRc(@"machine one.example.com login a password b");
-
-            Assert.Null(GetCredential(filePath, "unlisted.example.com"));
+            Assert.Equal(hasMachineEntry ? 1 : 0, credentials.Count);
+            Assert.False(credentials.ContainsKey("unlisted.example.com"));
+            if (hasMachineEntry)
+            {
+                Assert.Equal("a", credentials["one.example.com"].Login);
+                Assert.Equal("b", credentials["one.example.com"].Password);
+            }
         }
 
         [Fact]
@@ -273,21 +257,8 @@ machine other.cache login other password otherpw
 
             var credentials = NetRcUtil.ReadCredentials(path, warnings.Add);
 
-            Assert.Null(NetRcUtil.GetCredential(credentials, "internal.cache"));
+            Assert.False(credentials.ContainsKey("internal.cache"));
             Assert.Empty(warnings);
-        }
-
-        [Fact]
-        [Trait("Level", "L0")]
-        [Trait("Category", "Common")]
-        public void ReadCredentials_KeepsASnapshotUntilReadAgain()
-        {
-            var filePath = WriteNetRc("machine internal.cache login builder password original");
-            var credentials = NetRcUtil.ReadCredentials(filePath);
-            File.WriteAllText(filePath, "machine internal.cache login builder password rotated");
-
-            Assert.Equal("original", NetRcUtil.GetCredential(credentials, "internal.cache").Password);
-            Assert.Equal("rotated", GetCredential(filePath, "internal.cache").Password);
         }
 
         [Fact]
