@@ -12,6 +12,8 @@ The runner is the application that runs a job from a GitHub Actions workflow. It
 
 For more information about installing and using self-hosted runners, see [Adding self-hosted runners](https://help.github.com/en/actions/automating-your-workflow-with-github-actions/adding-self-hosted-runners) and [Using self-hosted runners in a workflow](https://help.github.com/en/actions/automating-your-workflow-with-github-actions/using-self-hosted-runners-in-a-workflow)
 
+This fork supports [authenticated action archive caches](docs/checks/actions.md#3-authenticated-action-archive-caches) through explicit `.netrc` credentials for redirect hosts.
+
 Runner releases:
 
 ![win](docs/res/win_sm.png) [Pre-reqs](docs/start/envwin.md) | [Download](https://github.com/actions/runner/releases)  
